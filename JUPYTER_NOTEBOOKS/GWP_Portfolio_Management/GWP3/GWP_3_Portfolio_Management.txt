@@ -1,0 +1,1507 @@
+STEP 1
+
+
+Install Required Libraries
+
+# Install packages and display progress
+!pip install -q yfinance pandas numpy scipy matplotlib seaborn scikit-learn
+
+# Verify installations
+import subprocess
+import sys
+
+# Note: package names for installation vs import are different
+packages = ['yfinance', 'pandas', 'numpy', 'scipy', 'matplotlib', 'seaborn', 'sklearn']
+install_names = ['yfinance', 'pandas', 'numpy', 'scipy', 'matplotlib', 'seaborn', 'scikit-learn']
+
+for i, package in enumerate(packages):
+    try:
+        __import__(package)
+        print(f"✓ {install_names[i]} successfully installed (import as {package})")
+    except ImportError as e:
+        print(f"✗ {install_names[i]} installation failed: {e}")
+
+Download Daily Prices
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Define assets with categories for better organization
+assets = {
+    'Tech': ["AAPL", "NVDA", "MSFT", "GOOGL", "TSLA"],
+    'Financial': ["JPM"],
+    'Energy': ["XOM"],
+    'Healthcare': ["LLY", "REGN"],
+    'ETF': ["SPY", "GLD", "TLT"]
+}
+
+# Flatten the list for downloading
+all_assets = [asset for category in assets.values() for asset in category]
+
+# Define date range with validation
+start = "2024-01-01"
+end = "2025-06-30"
+
+# Validate dates
+try:
+    start_date = pd.to_datetime(start)
+    end_date = pd.to_datetime(end)
+    
+    if start_date >= end_date:
+        print("Warning: Start date should be before end date")
+    if end_date > pd.Timestamp.now():
+        print("Warning: End date is in the future, using current date instead")
+        end_date = pd.Timestamp.now()
+        end = end_date.strftime('%Y-%m-%d')
+except Exception as e:
+    print(f"Date format error: {e}. Please use YYYY-MM-DD format")
+
+print(f"Downloading data for {len(all_assets)} assets from {start} to {end}")
+print("-" * 50)
+
+# Download data with progress indicator and error handling
+try:
+    # Download all data
+    data = yf.download(
+        all_assets, 
+        start=start, 
+        end=end, 
+        progress=True,  # Show download progress
+        group_by='ticker',
+        auto_adjust=True,  # Automatically adjust for splits/dividends
+        threads=True  # Use multi-threading for faster download
+    )
+    
+    print(f"\nData type: {type(data)}")
+    print(f"Data shape: {data.shape}")
+    print(f"Data columns: {data.columns}")
+    
+    # Handle different possible data structures
+    if isinstance(data, pd.DataFrame):
+        if isinstance(data.columns, pd.MultiIndex):
+            # MultiIndex case (multiple tickers)
+            print("\nMultiIndex columns detected")
+            
+            # For auto_adjust=True, the price column is 'Close' in the second level
+            # Get unique values from the first level of MultiIndex
+            first_level_values = data.columns.get_level_values(0).unique()
+            print(f"First level values: {first_level_values}")
+            
+            # Try to get price data
+            if 'Close' in first_level_values:
+                adj_close = data['Close']
+                print("Using 'Close' prices (auto_adjust=True)")
+            elif 'Adj Close' in first_level_values:
+                adj_close = data['Adj Close']
+                print("Using 'Adj Close' prices")
+            else:
+                # Try to get any price column
+                price_cols = [col for col in first_level_values 
+                            if col in ['Open', 'High', 'Low', 'Close', 'Adj Close']]
+                if price_cols:
+                    adj_close = data[price_cols[0]]
+                    print(f"Using '{price_cols[0]}' prices")
+                else:
+                    # If all else fails, try to reshape the data
+                    print("Attempting to reshape data...")
+                    # Create a DataFrame with tickers as columns
+                    tickers = data.columns.get_level_values(1).unique()
+                    price_data = {}
+                    
+                    # Try to find price data for each ticker
+                    for ticker in tickers:
+                        try:
+                            # Look for Close or Adj Close data for this ticker
+                            if ('Close', ticker) in data.columns:
+                                price_data[ticker] = data[('Close', ticker)]
+                            elif ('Adj Close', ticker) in data.columns:
+                                price_data[ticker] = data[('Adj Close', ticker)]
+                            else:
+                                # Get the first available column for this ticker
+                                ticker_data = data.xs(ticker, level=1, axis=1)
+                                if not ticker_data.empty:
+                                    price_data[ticker] = ticker_data.iloc[:, 0]
+                        except:
+                            continue
+                    
+                    if price_data:
+                        adj_close = pd.DataFrame(price_data)
+                        print(f"Reshaped data with {len(adj_close.columns)} assets")
+                    else:
+                        raise ValueError("Could not extract price data")
+        else:
+            # Single index case (one ticker or different structure)
+            print("\nSingle index columns detected")
+            if 'Close' in data.columns:
+                adj_close = pd.DataFrame({all_assets[0]: data['Close']})
+            elif 'Adj Close' in data.columns:
+                adj_close = pd.DataFrame({all_assets[0]: data['Adj Close']})
+            else:
+                # Try to use the first column
+                adj_close = pd.DataFrame({all_assets[0]: data.iloc[:, 0]})
+    
+    print("\n✅ Data downloaded successfully!")
+    print(f"Final data shape: {adj_close.shape}")
+    print(f"Assets: {list(adj_close.columns)}")
+    
+except Exception as e:
+    print(f"❌ Error downloading data: {e}")
+    # Fallback method: Download assets one by one
+    print("\nAttempting fallback method - downloading assets individually...")
+    
+    adj_close = pd.DataFrame()
+    for asset in all_assets:
+        try:
+            print(f"Downloading {asset}...")
+            ticker_data = yf.download(asset, start=start, end=end, progress=False, auto_adjust=True)
+            if not ticker_data.empty:
+                if 'Close' in ticker_data.columns:
+                    adj_close[asset] = ticker_data['Close']
+                elif 'Adj Close' in ticker_data.columns:
+                    adj_close[asset] = ticker_data['Adj Close']
+                else:
+                    adj_close[asset] = ticker_data.iloc[:, 0]
+            print(f"  ✅ {asset} downloaded")
+        except Exception as e2:
+            print(f"  ❌ {asset} failed: {e2}")
+            continue
+    
+    if adj_close.empty:
+        print("❌ All download attempts failed")
+        adj_close = pd.DataFrame()
+
+# Check for missing data
+if not adj_close.empty:
+    # Check for missing values
+    missing_data = adj_close.isnull().sum()
+    assets_with_missing = missing_data[missing_data > 0]
+    
+    if len(assets_with_missing) > 0:
+        print("\n⚠️  Assets with missing data:")
+        for asset, missing_count in assets_with_missing.items():
+            pct_missing = (missing_count / len(adj_close)) * 100
+            print(f"  {asset}: {missing_count} missing days ({pct_missing:.1f}%)")
+        
+        # Fill missing data
+        print("\nFilling missing data with forward fill method...")
+        adj_close = adj_close.fillna(method='ffill').fillna(method='bfill')
+    
+    # Basic data info
+    print(f"\n📊 Data Overview:")
+    print(f"  Date range: {adj_close.index[0].date()} to {adj_close.index[-1].date()}")
+    print(f"  Trading days: {len(adj_close)}")
+    print(f"  Assets: {len(adj_close.columns)}")
+    
+    # Display first few rows
+    print("\nFirst 5 rows of data:")
+    print(adj_close.head())
+    
+    # Display last few rows
+    print("\nLast 5 rows of data:")
+    print(adj_close.tail())
+    
+    # Basic statistics
+    print("\n📈 Basic Statistics:")
+    stats = adj_close.describe()
+    print(stats)
+
+    # Organize data by category
+    print("\n📁 Data by Category:")
+    for category, category_assets in assets.items():
+        available_assets = [a for a in category_assets if a in adj_close.columns]
+        if available_assets:
+            print(f"  {category}: {', '.join(available_assets)}")
+    
+    # Save to CSV
+    adj_close.to_csv('asset_prices.csv')
+    print("\n💾 Data saved to 'asset_prices.csv'")
+
+    # Quick visualization
+    try:
+        # Plot normalized prices
+        plt.figure(figsize=(14, 8))
+        normalized = adj_close.div(adj_close.iloc[0]).mul(100)
+        normalized.plot(linewidth=1.5)
+        plt.title('Asset Performance (Normalized to 100)', fontsize=16)
+        plt.xlabel('Date', fontsize=12)
+        plt.ylabel('Normalized Price', fontsize=12)
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.show()
+        print("✅ Visualization created successfully!")
+        
+        # Correlation heatmap
+        plt.figure(figsize=(12, 10))
+        returns = adj_close.pct_change().dropna()
+        correlation = returns.corr()
+        sns.heatmap(correlation, annot=True, cmap='coolwarm', center=0, 
+                    fmt='.2f', square=True, linewidths=0.5)
+        plt.title('Asset Correlation Matrix', fontsize=16)
+        plt.tight_layout()
+        plt.show()
+        
+    except Exception as e:
+        print(f"\n⚠️  Could not create visualization: {e}")
+
+else:
+    print("❌ No data available. Please check your internet connection and ticker symbols.")
+
+Optimization
+
+import numpy as np
+from scipy.optimize import minimize
+import pandas as pd
+import yfinance as yf
+
+# Define assets (as a list, not a dictionary for optimization)
+asset_list = ["AAPL", "NVDA", "MSFT", "GOOGL", "TSLA", "JPM", "XOM", "LLY", "REGN", "SPY", "GLD", "TLT"]
+
+# Download or load your price data
+# If you don't have adj_close yet, download it:
+print("Downloading price data...")
+adj_close = yf.download(asset_list, start="2024-01-01", end="2025-06-30", auto_adjust=True, progress=False)['Close']
+
+# Calculate returns and annualized metrics
+returns = adj_close.pct_change().dropna()
+mean_returns = returns.mean() * 252  # Annualized mean returns
+cov_matrix = returns.cov() * 252      # Annualized covariance matrix
+
+n = len(asset_list)
+
+def portfolio_volatility(weights):
+    """Calculate portfolio volatility (standard deviation)"""
+    return np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+
+def portfolio_return(weights):
+    """Calculate portfolio return"""
+    return np.dot(weights, mean_returns)
+
+def neg_sharpe(weights, risk_free_rate=0):
+    """Negative Sharpe ratio (for minimization)"""
+    ret = portfolio_return(weights)
+    vol = portfolio_volatility(weights)
+    return -(ret - risk_free_rate) / vol
+
+# Constraints: weights sum to 1
+constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+
+# Bounds: individual weights between 0 and 0.15 (15% max per asset)
+bounds = tuple((0, 0.15) for _ in range(n))
+
+# Initial guess: equal weights
+initial_weights = np.repeat(1/n, n)
+
+# Optimize for maximum Sharpe ratio
+opt = minimize(
+    neg_sharpe,
+    initial_weights,
+    method='SLSQP',
+    bounds=bounds,
+    constraints=constraints
+)
+
+# Get optimal weights
+optimal_weights = opt.x
+
+# Calculate optimal portfolio metrics
+optimal_return = portfolio_return(optimal_weights)
+optimal_volatility = portfolio_volatility(optimal_weights)
+optimal_sharpe = (optimal_return - 0) / optimal_volatility
+
+# Display results
+print("\n" + "=" * 60)
+print("OPTIMAL PORTFOLIO (MAX SHARPE RATIO)")
+print("=" * 60)
+
+# Create DataFrame for weights
+weights_df = pd.DataFrame({
+    'Asset': asset_list,
+    'Weight': optimal_weights,
+    'Weight %': optimal_weights * 100
+}).sort_values('Weight', ascending=False)
+
+print("\n📊 Optimal Weights:")
+active_weights = weights_df[weights_df['Weight'] > 0.001]
+print(active_weights.round(4))
+
+print(f"\n📈 Portfolio Metrics:")
+print(f"  Expected Annual Return: {optimal_return*100:.2f}%")
+print(f"  Expected Annual Volatility: {optimal_volatility*100:.2f}%")
+print(f"  Sharpe Ratio: {optimal_sharpe:.4f}")
+
+# Check if optimization was successful
+if opt.success:
+    print(f"\n✅ Optimization successful! ({opt.message})")
+else:
+    print(f"\n⚠️  Optimization warning: {opt.message}")
+
+# Optional: Show which assets from your original categories are included
+# If you want to see the breakdown by category
+original_categories = {
+    'Tech': ["AAPL", "NVDA", "MSFT", "GOOGL", "TSLA"],
+    'Financial': ["JPM"],
+    'Energy': ["XOM"],
+    'Healthcare': ["LLY", "REGN"],
+    'ETF': ["SPY", "GLD", "TLT"]
+}
+
+print("\n📁 Allocation by Category:")
+for category, cat_assets in original_categories.items():
+    cat_weight = sum(optimal_weights[asset_list.index(a)] for a in cat_assets if a in asset_list)
+    if cat_weight > 0.001:
+        print(f"  {category}: {cat_weight*100:.1f}%")
+
+Portfolio Performance
+
+# Calculate portfolio metrics using the optimal weights from your optimization
+port_return = portfolio_return(optimal_weights)  # Use optimal_weights instead of weights
+port_vol = portfolio_volatility(optimal_weights)
+sharpe_ratio = port_return / port_vol
+
+print(f"Portfolio Return: {port_return:.4f} ({port_return*100:.2f}%)")
+print(f"Portfolio Volatility: {port_vol:.4f} ({port_vol*100:.2f}%)")
+print(f"Sharpe Ratio: {sharpe_ratio:.4f}")
+
+
+STEP 2
+
+
+# ============================================================================
+# ADVANCED FINANCIAL ASSET ANALYSIS FRAMEWORK
+# Covariance Shrinkage + Random Matrix Theory + HRP Portfolio
+# ============================================================================
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import seaborn as sns
+import networkx as nx
+
+from sklearn.covariance import LedoitWolf
+from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list
+from scipy.spatial.distance import squareform
+from scipy.stats import gaussian_kde
+
+import warnings
+warnings.filterwarnings("ignore")
+
+plt.style.use("seaborn-v0_8-darkgrid")
+sns.set_palette("husl")
+
+# ============================================================================
+# 1. DOWNLOAD DATA
+# ============================================================================
+
+assets = [
+"AAPL","MSFT","NVDA","GOOGL","TSLA",
+"JPM","XOM",
+"LLY","REGN",
+"SPY","GLD","TLT"
+]
+
+start = "2024-01-01"
+end = "2025-06-30"
+
+print("Downloading data...")
+
+data = yf.download(
+    assets,
+    start=start,
+    end=end,
+    auto_adjust=True,
+    progress=False
+)["Close"]
+
+returns = data.pct_change().dropna()
+
+T, N = returns.shape
+
+print("Observations:",T)
+print("Assets:",N)
+
+# ============================================================================
+# 2. BASELINE MATRICES
+# ============================================================================
+
+cov = returns.cov()
+corr = returns.corr()
+
+# ============================================================================
+# 3. LEDOIT-WOLF SHRINKAGE COVARIANCE
+# ============================================================================
+
+print("\nApplying Ledoit-Wolf Shrinkage...")
+
+lw = LedoitWolf()
+
+lw.fit(returns.values)
+
+cov_lw = pd.DataFrame(
+    lw.covariance_,
+    index=assets,
+    columns=assets
+)
+
+corr_lw = cov_lw / np.outer(
+    np.sqrt(np.diag(cov_lw)),
+    np.sqrt(np.diag(cov_lw))
+)
+
+# ============================================================================
+# 4. RANDOM MATRIX THEORY DENOISING
+# ============================================================================
+
+def marchenko_pastur_bounds(T,N,sigma=1):
+
+    q = T/N
+
+    lambda_max = sigma**2*(1+np.sqrt(1/q))**2
+    lambda_min = sigma**2*(1-np.sqrt(1/q))**2
+
+    return lambda_min,lambda_max
+
+
+def rmt_denoise(corr):
+
+    eigenvals, eigenvecs = np.linalg.eigh(corr)
+
+    idx = eigenvals.argsort()[::-1]
+
+    eigenvals = eigenvals[idx]
+    eigenvecs = eigenvecs[:,idx]
+
+    lambda_min,lambda_max = marchenko_pastur_bounds(T,N)
+
+    noise = eigenvals <= lambda_max
+
+    eigenvals_d = eigenvals.copy()
+
+    eigenvals_d[noise] = eigenvals[noise].mean()
+
+    corr_d = eigenvecs @ np.diag(eigenvals_d) @ eigenvecs.T
+
+    corr_d = (corr_d + corr_d.T)/2
+
+    np.fill_diagonal(corr_d,1)
+
+    return corr_d,eigenvals,eigenvals_d,lambda_max
+
+corr_rmt,eig,eig_d,lambda_max = rmt_denoise(corr.values)
+
+corr_rmt = pd.DataFrame(corr_rmt,index=assets,columns=assets)
+
+# reconstruct covariance
+
+std = returns.std()
+
+cov_rmt = corr_rmt * np.outer(std,std)
+
+# ============================================================================
+# 5. EIGENVALUE SPECTRUM VS MARCHENKO PASTUR
+# ============================================================================
+
+plt.figure(figsize=(8,5))
+
+density = gaussian_kde(eig)
+
+x = np.linspace(min(eig),max(eig),200)
+
+plt.plot(x,density(x),label="Empirical Spectrum")
+
+plt.axvline(lambda_max,color="red",linestyle="--",
+            label="MP λ_max")
+
+plt.title("Eigenvalue Spectrum vs Marchenko-Pastur")
+plt.xlabel("Eigenvalue")
+plt.legend()
+
+plt.show()
+
+# ============================================================================
+# 6. HIERARCHICAL CLUSTERING
+# ============================================================================
+
+distance = np.sqrt(0.5 * (1 - corr_rmt))
+
+# convert to numpy
+distance = distance.values
+
+# enforce symmetry
+distance = (distance + distance.T) / 2
+
+# zero diagonal
+np.fill_diagonal(distance, 0)
+
+link = linkage(squareform(distance), method="ward")
+
+plt.figure(figsize=(10,6))
+dendrogram(link, labels=assets)
+plt.title("Hierarchical Asset Clustering")
+plt.show()
+
+order = leaves_list(link)
+
+corr_clustered = corr_rmt.iloc[order, order]
+
+plt.figure(figsize=(8,7))
+sns.heatmap(corr_clustered, cmap="coolwarm", vmin=-1, vmax=1)
+plt.title("Clustered Correlation Matrix")
+plt.show()
+
+# ============================================================================
+# 7. MINIMUM SPANNING TREE
+# ============================================================================
+
+print("\nBuilding Minimum Spanning Tree...")
+
+G = nx.Graph()
+
+for i in range(N):
+    for j in range(i+1,N):
+
+        G.add_edge(
+            assets[i],
+            assets[j],
+            weight=distance[i,j]
+        )
+
+mst = nx.minimum_spanning_tree(G)
+
+plt.figure(figsize=(8,6))
+
+pos = nx.spring_layout(mst,seed=42)
+
+nx.draw(mst,pos,
+        with_labels=True,
+        node_size=800,
+        font_size=9)
+
+plt.title("Minimum Spanning Tree of Assets")
+
+plt.show()
+
+# ============================================================================
+# 8. HRP PORTFOLIO
+# ============================================================================
+
+def get_cluster_var(cov,cluster):
+
+    cov_slice = cov.loc[cluster,cluster]
+
+    weights = 1/np.diag(cov_slice)
+
+    weights /= weights.sum()
+
+    variance = weights @ cov_slice @ weights
+
+    return variance
+
+
+def hrp_allocation(cov,link):
+
+    order = leaves_list(link)
+
+    ordered = cov.index[order]
+
+    weights = pd.Series(1,index=ordered)
+
+    clusters=[ordered]
+
+    while len(clusters)>0:
+
+        cluster = clusters.pop(0)
+
+        if len(cluster)<=1:
+            continue
+
+        split = int(len(cluster)/2)
+
+        c1 = cluster[:split]
+        c2 = cluster[split:]
+
+        var1 = get_cluster_var(cov,c1)
+        var2 = get_cluster_var(cov,c2)
+
+        alpha = 1 - var1/(var1+var2)
+
+        weights[c1]*=alpha
+        weights[c2]*=1-alpha
+
+        clusters.append(c1)
+        clusters.append(c2)
+
+    return weights
+
+
+hrp_weights = hrp_allocation(cov_rmt,link)
+
+print("\nHRP Portfolio Weights")
+
+print(hrp_weights.sort_values(ascending=False))
+
+# ============================================================================
+# 9. VISUALIZE PORTFOLIO
+# ============================================================================
+
+plt.figure(figsize=(8,5))
+
+hrp_weights.sort_values().plot(kind="barh")
+
+plt.title("Hierarchical Risk Parity Portfolio")
+
+plt.show()
+
+print("\nAnalysis Complete")
+
+Hierarchical Risk Parity Allocation
+
+# =============================================================================
+# HIERARCHICAL RISK PARITY (HRP) PORTFOLIO
+# =============================================================================
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import linkage, leaves_list
+from scipy.spatial.distance import squareform
+
+
+# -----------------------------------------------------------------------------
+# Compute cluster variance
+# -----------------------------------------------------------------------------
+
+def get_cluster_var(cov, cluster):
+
+    cov_slice = cov.loc[cluster, cluster]
+
+    ivp = 1 / np.diag(cov_slice)
+    ivp = ivp / ivp.sum()
+
+    cluster_var = ivp @ cov_slice @ ivp
+
+    return cluster_var
+
+
+# -----------------------------------------------------------------------------
+# Recursive bisection (core HRP algorithm)
+# -----------------------------------------------------------------------------
+
+def recursive_bisection(cov, sorted_assets):
+
+    weights = pd.Series(1, index=sorted_assets)
+
+    clusters = [sorted_assets]
+
+    while len(clusters) > 0:
+
+        cluster = clusters.pop(0)
+
+        if len(cluster) <= 1:
+            continue
+
+        split = int(len(cluster) / 2)
+
+        cluster1 = cluster[:split]
+        cluster2 = cluster[split:]
+
+        var1 = get_cluster_var(cov, cluster1)
+        var2 = get_cluster_var(cov, cluster2)
+
+        alpha = 1 - var1 / (var1 + var2)
+
+        weights[cluster1] *= alpha
+        weights[cluster2] *= 1 - alpha
+
+        clusters.append(cluster1)
+        clusters.append(cluster2)
+
+    return weights
+
+
+# -----------------------------------------------------------------------------
+# Main HRP function
+# -----------------------------------------------------------------------------
+
+def get_hrp_weights(cov_matrix, returns):
+
+    corr = returns.corr()
+
+    distance = np.sqrt(0.5 * (1 - corr))
+
+    distance = distance.values
+    np.fill_diagonal(distance, 0)
+
+    link = linkage(squareform(distance), method="ward")
+
+    sort_ix = leaves_list(link)
+
+    sorted_assets = returns.columns[sort_ix]
+
+    cov_sorted = cov_matrix.loc[sorted_assets, sorted_assets]
+
+    weights = recursive_bisection(cov_sorted, list(sorted_assets))
+
+    return weights
+
+
+# =============================================================================
+# COMPUTE HRP WEIGHTS
+# =============================================================================
+
+hrp_weights = get_hrp_weights(cov_matrix, returns)
+
+print("\nHRP Portfolio Weights\n")
+print(hrp_weights.sort_values(ascending=False))
+
+
+# =============================================================================
+# PORTFOLIO BACKTEST
+# =============================================================================
+
+portfolio_returns = returns[hrp_weights.index] @ hrp_weights
+
+cumulative_returns = (1 + portfolio_returns).cumprod()
+
+
+# =============================================================================
+# PERFORMANCE PLOT
+# =============================================================================
+
+plt.figure(figsize=(10,6))
+
+plt.plot(cumulative_returns, label="HRP Portfolio")
+
+plt.title("HRP Portfolio Backtest Performance")
+plt.xlabel("Date")
+plt.ylabel("Growth of $1")
+
+plt.legend()
+
+plt.show()
+
+Performance Metrics
+
+# =============================================================================
+# EXTENDED PORTFOLIO PERFORMANCE METRICS
+# =============================================================================
+
+def portfolio_performance_metrics(returns, risk_free_rate=0):
+
+    TRADING_DAYS = 252
+
+    # Annual return
+    annual_return = returns.mean() * TRADING_DAYS
+
+    # Annual volatility
+    annual_volatility = returns.std() * np.sqrt(TRADING_DAYS)
+
+    # Sharpe Ratio
+    sharpe_ratio = (annual_return - risk_free_rate) / annual_volatility
+
+    # -----------------------------
+    # Sortino Ratio
+    # -----------------------------
+    downside_returns = returns[returns < 0]
+    downside_volatility = downside_returns.std() * np.sqrt(TRADING_DAYS)
+
+    sortino_ratio = (annual_return - risk_free_rate) / downside_volatility
+
+    # -----------------------------
+    # Max Drawdown
+    # -----------------------------
+    cumulative_returns = (1 + returns).cumprod()
+    running_max = cumulative_returns.cummax()
+
+    drawdown = cumulative_returns / running_max - 1
+    max_drawdown = drawdown.min()
+
+    # -----------------------------
+    # Calmar Ratio
+    # -----------------------------
+    calmar_ratio = annual_return / abs(max_drawdown)
+
+    # -----------------------------
+    # Print results
+    # -----------------------------
+    print("\nPortfolio Performance Metrics")
+    print("-" * 40)
+
+    print(f"Annual Return      : {annual_return:.4f}")
+    print(f"Annual Volatility  : {annual_volatility:.4f}")
+    print(f"Sharpe Ratio       : {sharpe_ratio:.4f}")
+    print(f"Sortino Ratio      : {sortino_ratio:.4f}")
+    print(f"Max Drawdown       : {max_drawdown:.4f}")
+    print(f"Calmar Ratio       : {calmar_ratio:.4f}")
+
+    return {
+        "Annual Return": annual_return,
+        "Annual Volatility": annual_volatility,
+        "Sharpe Ratio": sharpe_ratio,
+        "Sortino Ratio": sortino_ratio,
+        "Max Drawdown": max_drawdown,
+        "Calmar Ratio": calmar_ratio,
+        "Drawdown": drawdown
+    }
+results = portfolio_performance_metrics(portfolio_returns)
+
+drawdown_series = results["Drawdown"]
+
+drawdown_series.plot(figsize=(10,5), title="Portfolio Drawdown")
+
+plt.show()
+
+plt.figure(figsize=(10,5))
+
+plt.fill_between(drawdown_series.index, drawdown_series, 0)
+
+plt.title("Portfolio Drawdown (Underwater Plot)")
+plt.ylabel("Drawdown")
+plt.xlabel("Date")
+
+plt.show()
+
+
+STEP 3
+
+
+# =============================================================================
+# PORTFOLIO OPTIMIZATION FRAMEWORK
+# Mean-Variance vs RMT Denoised vs HRP
+# =============================================================================
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from scipy.optimize import minimize
+from scipy.cluster.hierarchy import linkage, leaves_list
+from scipy.spatial.distance import squareform
+
+plt.style.use("seaborn-v0_8-darkgrid")
+
+# =============================================================================
+# 1. DOWNLOAD MARKET DATA
+# =============================================================================
+
+assets = [
+    "AAPL","MSFT","NVDA","GOOGL","TSLA",
+    "JPM","XOM","LLY","REGN","SPY","GLD","TLT"
+]
+
+start = "2024-01-01"
+end   = "2025-06-30"
+
+print("Downloading market data...")
+
+prices = yf.download(
+    assets,
+    start=start,
+    end=end,
+    auto_adjust=True,
+    progress=False
+)["Close"]
+
+returns = prices.pct_change().dropna()
+
+print("Observations:", len(returns))
+
+# =============================================================================
+# 2. PORTFOLIO STATISTICS
+# =============================================================================
+
+TRADING_DAYS = 252
+
+mean_returns = returns.mean() * TRADING_DAYS
+cov_matrix   = returns.cov()  * TRADING_DAYS
+
+num_assets = len(assets)
+
+# =============================================================================
+# 3. MEAN-VARIANCE OPTIMIZATION
+# =============================================================================
+
+def portfolio_return(weights):
+    return np.dot(weights, mean_returns)
+
+def portfolio_volatility(weights, cov):
+    return np.sqrt(np.dot(weights.T, np.dot(cov, weights)))
+
+def negative_sharpe(weights, cov):
+    ret = portfolio_return(weights)
+    vol = portfolio_volatility(weights, cov)
+    return -(ret / vol)
+
+bounds = tuple((0,0.15) for _ in range(num_assets))
+
+constraints = ({'type':'eq','fun':lambda x: np.sum(x)-1})
+
+initial_weights = np.repeat(1/num_assets, num_assets)
+
+print("Optimizing mean-variance portfolio...")
+
+opt = minimize(
+    negative_sharpe,
+    initial_weights,
+    args=(cov_matrix,),
+    method='SLSQP',
+    bounds=bounds,
+    constraints=constraints
+)
+
+weights_original = pd.Series(opt.x, index=assets)
+
+# =============================================================================
+# 4. RANDOM MATRIX THEORY DENOISING
+# =============================================================================
+
+corr = returns.corr()
+
+eigenvalues, eigenvectors = np.linalg.eigh(corr)
+
+idx = eigenvalues.argsort()[::-1]
+eigenvalues = eigenvalues[idx]
+eigenvectors = eigenvectors[:,idx]
+
+T = returns.shape[0]
+N = returns.shape[1]
+
+q = T / N
+
+lambda_max = (1 + np.sqrt(1/q))**2
+
+noise_mask = eigenvalues <= lambda_max
+
+eigenvalues_denoised = eigenvalues.copy()
+eigenvalues_denoised[noise_mask] = eigenvalues[noise_mask].mean()
+
+corr_denoised = eigenvectors @ np.diag(eigenvalues_denoised) @ eigenvectors.T
+corr_denoised = (corr_denoised + corr_denoised.T) / 2
+
+np.fill_diagonal(corr_denoised,1)
+
+corr_denoised = pd.DataFrame(corr_denoised, index=assets, columns=assets)
+
+cov_denoised = corr_denoised * np.outer(returns.std(), returns.std())
+
+# =============================================================================
+# 5. DENOISED PORTFOLIO OPTIMIZATION
+# =============================================================================
+
+print("Optimizing denoised portfolio...")
+
+opt2 = minimize(
+    negative_sharpe,
+    initial_weights,
+    args=(cov_denoised,),
+    method='SLSQP',
+    bounds=bounds,
+    constraints=constraints
+)
+
+weights_denoised = pd.Series(opt2.x, index=assets)
+
+# =============================================================================
+# 6. HIERARCHICAL RISK PARITY (HRP)
+# =============================================================================
+
+corr = returns.corr()
+
+distance = np.sqrt(0.5 * (1 - corr))
+distance = distance.values
+
+np.fill_diagonal(distance,0)
+
+link = linkage(squareform(distance), method='ward')
+
+sort_ix = leaves_list(link)
+
+sorted_assets = returns.columns[sort_ix]
+
+cov_sorted = returns[sorted_assets].cov()
+
+ivp = 1 / np.diag(cov_sorted)
+
+weights_hrp = ivp / ivp.sum()
+
+weights_hrp = pd.Series(weights_hrp, index=sorted_assets)
+
+# =============================================================================
+# 7. PORTFOLIO BACKTEST
+# =============================================================================
+
+print("Running portfolio backtest...")
+
+ret_original = returns @ weights_original
+
+ret_denoised = returns @ weights_denoised
+
+ret_hrp = returns[weights_hrp.index] @ weights_hrp
+
+cum_original = (1 + ret_original).cumprod()
+cum_denoised = (1 + ret_denoised).cumprod()
+cum_hrp      = (1 + ret_hrp).cumprod()
+
+# =============================================================================
+# 8. PERFORMANCE COMPARISON PLOT
+# =============================================================================
+
+plt.figure(figsize=(12,6))
+
+plt.plot(cum_original, label="Mean-Variance Portfolio")
+plt.plot(cum_denoised, label="RMT Denoised Portfolio")
+plt.plot(cum_hrp, label="HRP Clustered Portfolio")
+
+plt.title("Portfolio Performance Comparison")
+plt.xlabel("Date")
+plt.ylabel("Growth of $1 Investment")
+
+plt.legend()
+
+plt.show()
+
+# =============================================================================
+# DISPLAY FINAL WEIGHTS
+# =============================================================================
+
+print("\nMean-Variance Weights\n")
+print(weights_original.sort_values(ascending=False))
+
+print("\nDenoised Portfolio Weights\n")
+print(weights_denoised.sort_values(ascending=False))
+
+print("\nHRP Portfolio Weights\n")
+print(weights_hrp.sort_values(ascending=False))
+
+CLUSTERING DENDROGRAM
+
+# =============================================================================
+# 9. HIERARCHICAL CLUSTERING DENDROGRAM
+# =============================================================================
+
+plt.figure(figsize=(12,6))
+
+dendrogram(
+    link,
+    labels=returns.columns,
+    leaf_rotation=90,
+    leaf_font_size=10
+)
+
+plt.title("Asset Hierarchical Clustering Dendrogram")
+plt.xlabel("Assets")
+plt.ylabel("Distance")
+
+plt.tight_layout()
+plt.show()
+
+
+
+# =============================================================================
+# 10. CORRELATION MATRIX HEATMAP
+# =============================================================================
+
+plt.figure(figsize=(10,6))
+
+sns.heatmap(
+    returns.corr(),
+    cmap="coolwarm",
+    center=0,
+    annot=False,
+    square=True
+)
+
+plt.title("Asset Correlation Matrix")
+
+plt.tight_layout()
+plt.show()
+
+
+
+# =============================================================================
+# 11. PORTFOLIO PERFORMANCE METRICS
+# =============================================================================
+
+TRADING_DAYS = 252
+
+
+def compute_metrics(returns):
+
+    # Annualized return
+    annual_return = returns.mean() * TRADING_DAYS
+
+    # Annualized volatility
+    annual_volatility = returns.std() * np.sqrt(TRADING_DAYS)
+
+    # Sharpe Ratio (risk-free rate assumed = 0)
+    sharpe_ratio = annual_return / annual_volatility
+
+    # Compute drawdown properly
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.cummax()
+
+    drawdown = cumulative / running_max - 1
+    max_drawdown = drawdown.min()
+
+    return pd.Series({
+        "Annual Return": annual_return,
+        "Volatility": annual_volatility,
+        "Sharpe Ratio": sharpe_ratio,
+        "Max Drawdown": max_drawdown
+    })
+
+
+# =============================================================================
+# CREATE PERFORMANCE TABLE
+# =============================================================================
+
+performance = pd.DataFrame({
+    "Mean-Variance": compute_metrics(ret_original),
+    "RMT Denoised": compute_metrics(ret_denoised),
+    "HRP": compute_metrics(ret_hrp)
+}).T
+
+
+print("\nPortfolio Performance Comparison\n")
+print(performance.round(4))
+
+performance
+
+
+STEP 4
+
+
+# =============================================================================
+# 12. PORTFOLIO PERFORMANCE METRICS (Extended)
+# =============================================================================
+
+TRADING_DAYS = 252
+
+def compute_risk_metrics(returns):
+    """
+    Compute key portfolio performance metrics:
+    - Annualized return
+    - Annualized volatility
+    - Sharpe ratio
+    - Sortino ratio
+    - Max drawdown
+    - Expected Shortfall (95%)
+    """
+    # Annualized return & volatility
+    ann_return = returns.mean() * TRADING_DAYS
+    ann_vol = returns.std() * np.sqrt(TRADING_DAYS)
+
+    # Sharpe Ratio (risk-free rate = 0)
+    sharpe = ann_return / ann_vol
+
+    # Sortino Ratio (focus on downside risk)
+    downside = returns[returns < 0]
+    sortino = ann_return / (downside.std() * np.sqrt(TRADING_DAYS))
+
+    # Max Drawdown
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.cummax()
+    drawdown = cumulative / running_max - 1
+    max_dd = drawdown.min()
+
+    # Expected Shortfall (95%)
+    var95 = np.percentile(returns, 5)
+    es95 = returns[returns <= var95].mean()
+
+    return pd.Series({
+        "Annual Return": ann_return,
+        "Volatility": ann_vol,
+        "Sharpe Ratio": sharpe,
+        "Sortino Ratio": sortino,
+        "Max Drawdown": max_dd,
+        "Expected Shortfall": es95
+    })
+
+# =============================================================================
+# 13. COMBINED PORTFOLIO: Denoised + HRP
+# =============================================================================
+
+# Compute distance & clustering from denoised covariance
+cov_denoised_df = pd.DataFrame(cov_denoised, index=assets, columns=assets)
+corr_denoised = cov_denoised_df.corr()
+distance = np.sqrt(0.5 * (1 - corr_denoised))
+link_combined = linkage(squareform(distance), method='ward')
+
+# Sort assets by hierarchical leaves
+sort_ix = leaves_list(link_combined)
+sorted_assets = corr_denoised.columns[sort_ix]
+
+# Covariance sliced and Inverse-Variance Portfolio (IVP) weights
+cov_sorted = cov_denoised_df.loc[sorted_assets, sorted_assets]
+ivp = 1 / np.diag(cov_sorted)
+weights_combined = ivp / ivp.sum()
+weights_combined = pd.Series(weights_combined, index=sorted_assets)
+
+# =============================================================================
+# 14. COMPUTE PORTFOLIO RETURNS
+# =============================================================================
+
+ret_original  = returns @ weights_original
+ret_denoised  = returns @ weights_denoised
+ret_hrp       = returns[weights_hrp.index] @ weights_hrp
+ret_combined  = returns[weights_combined.index] @ weights_combined
+
+# =============================================================================
+# 15. PERFORMANCE COMPARISON TABLE
+# =============================================================================
+
+performance_df = pd.DataFrame([
+    compute_risk_metrics(ret_original),
+    compute_risk_metrics(ret_denoised),
+    compute_risk_metrics(ret_hrp),
+    compute_risk_metrics(ret_combined)
+], index=["Original", "Denoised", "HRP", "Denoised + HRP"])
+
+print("\nPortfolio Performance Metrics (Extended)\n")
+print(performance_df.round(4))
+
+# =============================================================================
+# 16. PORTFOLIO GROWTH COMPARISON GRAPH
+# =============================================================================
+
+cum_returns = pd.DataFrame({
+    "Original": (1 + ret_original).cumprod(),
+    "Denoised": (1 + ret_denoised).cumprod(),
+    "HRP": (1 + ret_hrp).cumprod(),
+    "Denoised + HRP": (1 + ret_combined).cumprod()
+})
+
+plt.figure(figsize=(12,6))
+for col in cum_returns.columns:
+    plt.plot(cum_returns[col], label=col)
+
+plt.title("Portfolio Strategy Growth Comparison")
+plt.xlabel("Date")
+plt.ylabel("Growth of $1 Investment")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+Risk vs Return Plot
+
+# =============================================================================
+# 17. RISK VS RETURN PLOT
+# =============================================================================
+
+plt.figure(figsize=(8,6))
+
+# Scatter plot
+plt.scatter(performance_df["Volatility"], performance_df["Annual Return"], 
+            s=100, color="teal", alpha=0.7)
+
+# Annotate points with portfolio names
+for i in performance_df.index:
+    plt.annotate(
+        i,
+        xy=(performance_df.loc[i, "Volatility"], performance_df.loc[i, "Annual Return"]),
+        xytext=(5, 5),
+        textcoords='offset points',
+        fontsize=10,
+        color="darkblue"
+    )
+
+# Labels and title
+plt.xlabel("Annualized Volatility", fontsize=12)
+plt.ylabel("Annualized Return", fontsize=12)
+plt.title("Risk vs Return Comparison of Portfolios", fontsize=14, weight='bold')
+
+# Grid and styling
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+
+STEP 5 (Out-of-Sample Testing)
+
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# Out-of-Sample date range
+# -----------------------------
+test_start = "2024-01-01"
+test_end   = "2025-01-01"  # must be in the past
+
+# -----------------------------
+# Download Out-of-Sample Data
+# -----------------------------
+prices_oos = yf.download(
+    assets,
+    start=test_start,
+    end=test_end,
+    progress=False
+)
+
+# If multi-index columns exist
+if isinstance(prices_oos.columns, pd.MultiIndex):
+    prices_oos = prices_oos["Close"]
+
+# Keep only assets we requested
+prices_oos = prices_oos[assets]
+
+# Calculate returns
+returns_oos = prices_oos.pct_change().dropna()
+
+print("Successfully downloaded:", list(prices_oos.columns))
+
+# -----------------------------
+# Align weights with available assets
+# -----------------------------
+weights_original_oos = weights_original[weights_original.index.intersection(returns_oos.columns)]
+weights_denoised_oos = weights_denoised[weights_denoised.index.intersection(returns_oos.columns)]
+weights_hrp_oos = weights_hrp[weights_hrp.index.intersection(returns_oos.columns)]
+weights_combined_oos = weights_combined[weights_combined.index.intersection(returns_oos.columns)]
+
+# -----------------------------
+# Compute portfolio returns
+# -----------------------------
+oos_portfolios = {
+    "Traditional": returns_oos @ weights_original_oos,
+    "Denoised": returns_oos @ weights_denoised_oos,
+    "HRP": returns_oos @ weights_hrp_oos,
+    "Denoised + HRP": returns_oos @ weights_combined_oos
+}
+
+# -----------------------------
+# Performance metrics
+# -----------------------------
+def performance_metrics(returns):
+    TRADING_DAYS = 252
+    annual_return = returns.mean() * TRADING_DAYS
+    annual_vol = returns.std() * np.sqrt(TRADING_DAYS)
+    sharpe = annual_return / annual_vol if annual_vol != 0 else np.nan
+    downside = returns[returns < 0]
+    sortino = annual_return / (downside.std() * np.sqrt(TRADING_DAYS)) if len(downside) > 0 else np.nan
+    cumulative = (1 + returns).cumprod()
+    drawdown = (cumulative - cumulative.cummax()) / cumulative.cummax()
+    max_dd = drawdown.min()
+    var95 = np.percentile(returns, 5)
+    es = returns[returns <= var95].mean() if len(returns[returns <= var95]) > 0 else np.nan
+    return [annual_return, annual_vol, sharpe, sortino, max_dd, es]
+
+# -----------------------------
+# Performance table
+# -----------------------------
+oos_results = pd.DataFrame(
+    [performance_metrics(r) for r in oos_portfolios.values()],
+    columns=["Annual Return", "Volatility", "Sharpe Ratio", "Sortino Ratio", "Max Drawdown", "Expected Shortfall"],
+    index=oos_portfolios.keys()
+)
+
+print("Out-of-Sample Performance Metrics")
+print(oos_results)
+
+# -----------------------------
+# Portfolio growth plot
+# -----------------------------
+plt.figure(figsize=(12,6))
+for name, r in oos_portfolios.items():
+    (1 + r).cumprod().plot(label=name)
+plt.title("Out-of-Sample Portfolio Growth", fontsize=14, weight='bold')
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("Growth of $1", fontsize=12)
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+Cumulative Returns Comparison
+
+plt.figure(figsize=(12,6))
+
+for name, r in oos_portfolios.items():
+    (1 + r).cumprod().plot(label=name)
+
+plt.title("Cumulative Returns Comparison", fontsize=14, weight='bold')
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("Growth of $1", fontsize=12)
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+Drawdown Comparison Chart
+
+plt.figure(figsize=(12,6))
+
+for name, r in oos_portfolios.items():
+    cumulative = (1 + r).cumprod()
+    drawdown = (cumulative - cumulative.cummax()) / cumulative.cummax()
+    plt.plot(drawdown, label=name)
+
+plt.title("Drawdown Comparison", fontsize=14, weight='bold')
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("Drawdown (%)", fontsize=12)
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+Risk vs Return Scatter Plot
+
+# Compute performance metrics for the scatter plot
+metrics_scatter = {}
+TRADING_DAYS = 252
+
+for name, r in oos_portfolios.items():
+    ann_return = r.mean() * TRADING_DAYS
+    ann_vol = r.std() * np.sqrt(TRADING_DAYS)
+    metrics_scatter[name] = (ann_vol, ann_return)
+
+# Plot
+plt.figure(figsize=(8,6))
+
+for name, (vol, ret) in metrics_scatter.items():
+    plt.scatter(vol, ret, s=100)  # s=100 makes points bigger
+    plt.text(vol*1.01, ret*1.01, name)  # label next to point
+
+plt.xlabel("Annualized Volatility", fontsize=12)
+plt.ylabel("Annualized Return", fontsize=12)
+plt.title("Risk vs Return Scatter Plot", fontsize=14, weight='bold')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+Risk-Return Comparison Plot
+
+plt.figure(figsize=(8,6))
+
+# Scatter points
+plt.scatter(oos_results["Volatility"], oos_results["Annual Return"], s=100, c='steelblue', edgecolor='black')
+
+# Annotate each portfolio
+for i in oos_results.index:
+    plt.text(
+        oos_results.loc[i, "Volatility"] * 1.01,  # slightly offset x
+        oos_results.loc[i, "Annual Return"] * 1.01,  # slightly offset y
+        i,
+        fontsize=10,
+        weight='bold'
+    )
+
+# Axis labels
+plt.xlabel("Annualized Volatility", fontsize=12)
+plt.ylabel("Annualized Return", fontsize=12)
+
+# Title
+plt.title("Out-of-Sample Risk vs Return", fontsize=14, weight='bold')
+
+# Grid and layout
+plt.grid(alpha=0.3, linestyle='--')
+plt.tight_layout()
+plt.show()
