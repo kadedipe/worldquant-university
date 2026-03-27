@@ -1,0 +1,531 @@
+Use the Lewis (2001) approach with a regular MSE error function considering a Heston model without jumps.
+
+# Team A
+# Step 1: Calibration of Heston Model (Lewis 2001) for short maturity (15 days)
+import numpy as np
+import pandas as pd
+from scipy.integrate import quad
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+import warnings
+
+# Suppress integration warnings for a cleaner output
+warnings.filterwarnings('ignore', category=UserWarning)
+
+# --- 1. Load Market Data from Excel ---
+file_path = "/content/SM Energy Company_Option data.xlsx"
+market_data = pd.read_excel(file_path)
+
+# Rename columns to match our expected naming convention
+market_data = market_data.rename(columns={
+    'Days to maturity': 'Days to Expiry'
+})
+
+# Filter for options with approximately 15 days to maturity
+market_data = market_data[market_data['Days to Expiry'].between(14, 16)].copy()
+
+# Convert days to years (assuming 250 trading days/year)
+market_data['T'] = market_data['Days to Expiry'] / 250.0
+
+# Current market parameters
+S0 = 232.90         # Current stock price (USD)
+r = 0.015           # Risk-free rate (1.50% p.a.)
+T = 15.0 / 250.0    # Time to maturity for calibration (15 days in years)
+
+print("--- Market Data for T≈15 days ---")
+print(market_data[['Strike', 'Type', 'Price', 'Days to Expiry']])
+print("-" * 50)
+
+# --- 2. Implement Heston Model Functions ---
+
+def heston_char_func(phi, S0, v0, r, T, kappa, theta, sigma, rho):
+    """
+    Calculates the Heston characteristic function f(phi) for the log-price.
+    This is a standard implementation.
+    """
+    x = np.log(S0)
+    a = kappa * theta
+    b = kappa
+
+    d = np.sqrt((rho * sigma * phi * 1j - b)**2 - sigma**2 * (2 * phi * 1j - phi**2))
+    g = (b - rho * sigma * phi * 1j + d) / (b - rho * sigma * phi * 1j - d)
+
+    C = r * phi * 1j * T + (a / sigma**2) * ((b - rho * sigma * phi * 1j + d) * T - 2 * np.log((1 - g * np.exp(d * T)) / (1 - g)))
+    D = (b - rho * sigma * phi * 1j + d) / sigma**2 * ((1 - np.exp(d * T)) / (1 - g * np.exp(d * T)))
+
+    return np.exp(C + D * v0 + 1j * phi * x)
+
+def heston_price_fourier(S0, K, v0, r, T, kappa, theta, sigma, rho):
+    """
+    Prices a European Call option using the Heston model with Fourier inversion.
+    This P1, P2 formulation is stable and common.
+    """
+    # Integrands for P1 and P2 probabilities
+    def p1_integrand(phi):
+        return np.real(heston_char_func(phi - 1j, S0, v0, r, T, kappa, theta, sigma, rho) * np.exp(-1j * phi * np.log(K)) / (1j * phi * S0))
+
+    def p2_integrand(phi):
+        return np.real(heston_char_func(phi, S0, v0, r, T, kappa, theta, sigma, rho) * np.exp(-1j * phi * np.log(K)) / (1j * phi))
+
+    # Integrate from a small number to a large number to avoid singularity at zero
+    P1, err1 = quad(p1_integrand, 1e-5, 200)
+    P2, err2 = quad(p2_integrand, 1e-5, 200)
+
+    # Calculate final probabilities
+    P1 = 0.5 + P1 / np.pi
+    P2 = 0.5 + P2 / np.pi
+
+    return S0 * P1 - K * np.exp(-r * T) * P2
+
+# --- 3. Define MSE Error Function and Perform Optimization ---
+
+def mse_error(params):
+    """
+    Calculates the Mean Squared Error between model prices and market prices.
+    """
+    kappa, theta, sigma, rho, v0 = params
+
+    # Impose Feller Condition (2*kappa*theta >= sigma**2) and parameter bounds
+    if not (2 * kappa * theta >= sigma**2 and 0.01 < v0 and 0.01 < theta and 0.01 < sigma):
+        return 1e9  # Return a large error if params are invalid
+
+    model_prices = []
+    for _, row in market_data.iterrows():
+        K = row['Strike']
+        T = row['T']  # Use actual time to expiry for each option
+
+        # Calculate the call price from the model
+        call_price = heston_price_fourier(S0, K, v0, r, T, kappa, theta, sigma, rho)
+
+        if row['Type'] == 'C':
+            model_prices.append(call_price)
+        else:
+            # Use Put-Call Parity for put options
+            put_price = call_price - S0 + K * np.exp(-r * T)
+            model_prices.append(put_price)
+
+    # Calculate MSE
+    error = np.mean((np.array(model_prices) - market_data['Price'].values)**2)
+
+    # Print progress during optimization
+    print(f"Params: [k:{kappa:.3f}, th:{theta:.3f}, sig:{sigma:.3f}, rho:{rho:.3f}, v0:{v0:.3f}] | MSE: {error:.4f}")
+
+    return error
+
+# Initial guess and bounds for parameters [kappa, theta, sigma, rho, v0]
+initial_params = [3.0, 0.05, 0.4, -0.6, 0.05]
+bounds = [(0.1, 10), (0.01, 1), (0.1, 2), (-0.99, 0), (0.01, 1)]  # Force rho to be negative (Leverage Effect)
+
+print("\n--- Starting Calibration Process ---")
+# Use the L-BFGS-B optimizer, suitable for bounded problems
+result = minimize(mse_error, initial_params, bounds=bounds, method='L-BFGS-B', 
+                  options={'maxiter': 500, 'ftol': 1e-8, 'disp': True})
+print("--- Calibration Finished ---\n")
+
+# --- 4. Display Results and Generate Graph ---
+optimal_params = result.x
+final_mse = result.fun
+
+print("--- Optimal Heston Parameters ---")
+print(f"Optimal Kappa (κ): {optimal_params[0]:.4f}  # Mean reversion speed")
+print(f"Optimal Theta (θ): {optimal_params[1]:.4f}  # Long-term variance")
+print(f"Optimal Sigma (σ): {optimal_params[2]:.4f}  # Volatility of volatility")
+print(f"Optimal Rho (ρ): {optimal_params[3]:.4f}   # Correlation (should be negative for leverage effect)")
+print(f"Optimal v0: {optimal_params[4]:.4f}       # Initial variance")
+print("-" * 50)
+print(f"Final Mean Squared Error (MSE): {final_mse:.6f}")
+print(f"Feller condition (2κθ ≥ σ²): {2*optimal_params[0]*optimal_params[1]:.4f} ≥ {optimal_params[2]**2:.4f} → {'Satisfied' if 2*optimal_params[0]*optimal_params[1] >= optimal_params[2]**2 else 'Violated'}")
+print("-" * 50)
+
+# Recalculate model prices with optimal parameters for the final table
+kappa_opt, theta_opt, sigma_opt, rho_opt, v0_opt = optimal_params
+market_data['Model Price'] = np.nan
+
+for idx, row in market_data.iterrows():
+    K = row['Strike']
+    T = row['T']
+    call_price = heston_price_fourier(S0, K, v0_opt, r, T, kappa_opt, theta_opt, sigma_opt, rho_opt)
+    if row['Type'] == 'C':
+        market_data.at[idx, 'Model Price'] = call_price
+    else:
+        put_price = call_price - S0 + K * np.exp(-r * T)
+        market_data.at[idx, 'Model Price'] = put_price
+
+# Calculate absolute errors
+market_data['Abs Error'] = (market_data['Model Price'] - market_data['Price']).abs()
+
+# Display comparison table
+print("\n--- Price Comparison: Market vs. Model ---")
+print(market_data[['Strike', 'Type', 'Price', 'Model Price', 'Abs Error', 'Days to Expiry']].round(4))
+print("-" * 50)
+
+# Generate the comparison graph
+plt.style.use('seaborn-v0_8-whitegrid')
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+
+# Plot for Calls
+calls = market_data[market_data['Type'] == 'C']
+ax1.scatter(calls['Strike'], calls['Price'], color='blue', marker='o', s=80, label='Market Call Prices')
+ax1.plot(calls['Strike'], calls['Model Price'], 'b-x', label='Heston Model Call Prices')
+ax1.set_title('Call Option Prices (T≈15 days)', fontsize=14)
+ax1.set_xlabel('Strike Price (K)', fontsize=12)
+ax1.set_ylabel('Option Price ($)', fontsize=12)
+ax1.legend(fontsize=11)
+ax1.grid(True)
+
+# Plot for Puts
+puts = market_data[market_data['Type'] == 'P']
+ax2.scatter(puts['Strike'], puts['Price'], color='red', marker='o', s=80, label='Market Put Prices')
+ax2.plot(puts['Strike'], puts['Model Price'], 'r-x', label='Heston Model Put Prices')
+ax2.set_title('Put Option Prices (T≈15 days)', fontsize=14)
+ax2.set_xlabel('Strike Price (K)', fontsize=12)
+ax2.set_ylabel('Option Price ($)', fontsize=12)
+ax2.legend(fontsize=11)
+ax2.grid(True)
+
+plt.suptitle('Step 1: Heston Model Calibration vs. Market Prices (T≈15 days)', fontsize=16)
+plt.tight_layout()
+plt.show()
+
+# Plot implied volatilities if available in data
+if 'Implied Vol' in market_data.columns:
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.scatter(market_data['Strike'], market_data['Implied Vol'], color='green', label='Market Implied Vol')
+    ax.set_title('Implied Volatility Smile (T≈15 days)', fontsize=14)
+    ax.set_xlabel('Strike Price (K)', fontsize=12)
+    ax.set_ylabel('Implied Volatility', fontsize=12)
+    ax.legend()
+    ax.grid(True)
+    plt.show()
+	
+	
+Using Monte-Carlo methods to obtain an ATM Asian option with (20 days) maturity.
+
+
+import numpy as np
+from scipy.stats import norm
+
+# --- 1. Set Parameters ---       # Heston model dynamics (Heston, 1993)
+S0 = 232.90          # Current stock price
+K = S0               # ATM strike
+r = 0.015            # Risk-free rate (1.5%)
+T = 20 / 250         # 20 days to maturity (in years)
+n_sim = 100_000      # Number of Monte Carlo simulations
+n_steps = 20         # Daily observations (20 steps)
+dt = T / n_steps     # Time increment
+
+# --- 2. Load Calibrated Heston Parameters ---     # Monte Carlo simulation with Euler-Maruyama (Kloeden & Platen, 1992)
+# (From Step 1 calibration)
+kappa = 3.2          # Mean reversion speed
+theta = 0.04         # Long-term variance
+sigma = 0.3          # Volatility of volatility
+rho = -0.7           # Correlation
+v0 = 0.05            # Initial variance
+
+# --- 3. Monte Carlo Simulation ---     # Risk-neutral pricing (Hull, 2018)
+np.random.seed(42)   # For reproducibility
+
+# Initialize arrays
+S = np.zeros((n_sim, n_steps + 1))
+S[:, 0] = S0         # Initial stock price
+v = np.zeros_like(S)
+v[:, 0] = v0         # Initial variance
+
+# Generate correlated Brownian motions
+dW1 = np.random.normal(0, np.sqrt(dt), (n_sim, n_steps))
+dW2 = rho * dW1 + np.sqrt(1 - rho**2) * np.random.normal(0, np.sqrt(dt), (n_sim, n_steps))
+
+# Euler-Maruyama discretization
+for t in range(1, n_steps + 1):
+    v_prev = np.maximum(v[:, t-1], 0)  # Ensure variance remains positive
+    v[:, t] = v_prev + kappa * (theta - v_prev) * dt + sigma * np.sqrt(v_prev) * dW2[:, t-1]
+    S[:, t] = S[:, t-1] * (1 + r * dt + np.sqrt(v_prev) * dW1[:, t-1])
+
+# --- 4. Compute Asian Option Payoff ---
+avg_S = np.mean(S[:, 1:], axis=1)  # Arithmetic average (exclude initial S0)
+payoff = np.maximum(avg_S - K, 0)
+asian_price = np.exp(-r * T) * np.mean(payoff)
+
+# --- 5. Apply 4% Bank Fee ---
+final_price = asian_price * 1.04
+
+# --- 6. Display Results ---
+print("--- Asian Call Option Pricing Results ---")
+print(f"Fair Price (Before Fee): ${asian_price:.4f}")
+print(f"Final Price (After 4% Fee): ${final_price:.4f}")
+print(f"Number of Simulations: {n_sim:,}")
+print(f"Standard Error: ${np.std(payoff) / np.sqrt(n_sim):.6f}")
+print("-" * 50)
+
+
+Using Carr-Madan (1999) approach to Bates (1996) model.
+
+
+2.3.1 Load and Filter Data
+
+# Filter for 60-day maturity options (55-65 day range)
+market_data_60d = market_data[market_data['Days to Expiry'].between(55, 65)].copy()
+market_data_60d['T'] = market_data_60d['Days to Expiry'] / 250.0
+
+print("--- Market Data for T≈60 days ---")
+print(market_data_60d[['Strike', 'Type', 'Price', 'Days to Expiry']])
+
+
+2.3.2 Bates Characteristic Function
+
+def bates_char_func(phi, S0, v0, r, T, kappa, theta, sigma, rho, lambda_j, mu_j, delta_j):
+    """Characteristic function for Bates model (Heston + jumps)"""
+    # Heston component (same as before)
+    x = np.log(S0)
+    a = kappa * theta
+    b = kappa
+    d = np.sqrt((rho * sigma * phi * 1j - b)**2 - sigma**2 * (2 * phi * 1j - phi**2))
+    g = (b - rho * sigma * phi * 1j + d) / (b - rho * sigma * phi * 1j - d)
+    C = r * phi * 1j * T + (a / sigma**2) * ((b - rho * sigma * phi * 1j + d) * T - 2 * np.log((1 - g * np.exp(d * T)) / (1 - g)))
+    D = (b - rho * sigma * phi * 1j + d) / sigma**2 * ((1 - np.exp(d * T)) / (1 - g * np.exp(d * T)))
+    heston_part = np.exp(C + D * v0 + 1j * phi * x)
+    
+    # Jump component (Merton-style log-normal jumps)
+    jump_part = np.exp(-lambda_j * mu_j * phi * 1j * T + lambda_j * T * ((1 + mu_j)**(phi * 1j) * np.exp(0.5 * delta_j**2 * (phi * 1j**2 - phi * 1j)) - 1))
+    
+    return heston_part * jump_part
+
+
+2.3.3 Calibration Setup
+
+def bates_price(S0, K, v0, r, T, params):
+    """Bates option price via Lewis (2001) inversion"""
+    kappa, theta, sigma, rho, v0, lambda_j, mu_j, delta_j = params
+    
+    def integrand(phi):
+        return np.real(
+            bates_char_func(phi - 1j, S0, v0, r, T, kappa, theta, sigma, rho, lambda_j, mu_j, delta_j) * 
+            np.exp(-1j * phi * np.log(K)) / (1j * phi * S0)
+        )
+    
+    P1, _ = quad(integrand, 1e-5, 200)
+    P1 = 0.5 + P1 / np.pi
+    return S0 * P1 - K * np.exp(-r * T) * (0.5 + quad(lambda phi: np.real(
+        bates_char_func(phi, S0, v0, r, T, kappa, theta, sigma, rho, lambda_j, mu_j, delta_j) * 
+        np.exp(-1j * phi * np.log(K)) / (1j * phi)), 1e-5, 200)[0] / np.pi)
+
+def mse_error_bates(params):
+    """MSE between Bates model and market prices"""
+    kappa, theta, sigma, rho, v0, lambda_j, mu_j, delta_j = params
+    
+    # Parameter constraints
+    if not (2*kappa*theta >= sigma**2 and sigma > 0 and -1 <= rho <= 1 and 
+            lambda_j >= 0 and delta_j > 0 and -1 < mu_j < 1):
+        return 1e9
+    
+    model_prices = []
+    for _, row in market_data_60d.iterrows():
+        call_price = bates_price(S0, row['Strike'], v0, r, row['T'], params)
+        if row['Type'] == 'P':
+            call_price = call_price - S0 + row['Strike'] * np.exp(-r * row['T'])  # Put-call parity
+        model_prices.append(call_price)
+    
+    error = np.mean((np.array(model_prices) - market_data_60d['Price'].values)**2)
+    print(f"Params: [κ={kappa:.2f}, θ={theta:.4f}, σ={sigma:.2f}, ρ={rho:.2f}, "
+          f"λ={lambda_j:.2f}, μ={mu_j:.2f}, δ={delta_j:.2f}] | MSE: {error:.4f}")
+    return error
+
+# Initial guess and bounds
+initial_params = [3.0, 0.05, 0.4, -0.6, 0.05, 0.1, -0.1, 0.1]  # [Heston params + λ, μ, δ]
+bounds = [
+    (0.1, 10), (0.01, 1), (0.1, 2), (-0.99, 0), (0.01, 1),  # Heston bounds
+    (0, 5), (-0.5, 0.5), (0.01, 1)  # Jump bounds: λ≥0, μ∈(-0.5,0.5), δ>0
+]
+
+
+2.3.4 Run Calibration
+
+print("\n--- Starting Bates Calibration ---")
+result = minimize(mse_error_bates, initial_params, bounds=bounds, method='L-BFGS-B',
+                  options={'maxiter': 500, 'ftol': 1e-8, 'disp': True})
+
+# Print results
+print("\n--- Optimal Bates Parameters ---")
+param_names = ["κ", "θ", "σ", "ρ", "v₀", "λ", "μ", "δ"]
+for name, value in zip(param_names, result.x):
+    print(f"{name}: {value:.4f}")
+print(f"MSE: {result.fun:.6f}")
+
+
+2.4.1 Calibration Output
+
+# Sample output from calibration
+print("\n--- Calibrated Bates Parameters ---")
+print(f"κ (mean reversion): {result.x[0]:.3f}  # Heston (1993)")
+print(f"λ (jump intensity): {result.x[5]:.3f}  # Bates (1996)")
+print(f"μ (jump mean):      {result.x[6]:.3f}  # Merton (1976)")
+print(f"δ (jump vol):       {result.x[7]:.3f}  # Cont & Tankov (2004)")
+
+
+2.2.1 Bates FFT Pricing
+
+def bates_carr_madan(S0, K, T, r, params, alpha=1.25, N=2**14, eta=0.1):
+    """Bates option pricing via Carr-Madan FFT"""
+    kappa, theta, sigma, rho, v0, lambda_j, mu_j, delta_j = params
+    
+    # FFT grid setup
+    lambda_ = 2*np.pi/(N*eta)
+    beta = np.log(S0) - lambda_*N/2
+    u = np.arange(N)*eta
+    
+    # Bates characteristic function with damping
+    psi = np.exp(-r*T)*bates_char_func(u - (alpha+1)*1j, S0, v0, r, T, *params)
+    psi /= (alpha**2 + alpha - u**2 + 1j*(2*alpha+1)*u)
+    
+    # FFT computation with Simpson's rule
+    simpson_weights = 3 + (-1)**(np.arange(N)+1)
+    simpson_weights[0] = 1
+    fft_input = np.exp(1j*beta*u)*psi*eta/3*simpson_weights
+    fft_output = np.fft.fft(fft_input).real
+    
+    strikes = np.exp(beta + lambda_*np.arange(N))
+    call_prices = np.exp(-alpha*np.log(strikes))*fft_output/np.pi
+    
+    return np.interp(K, strikes, call_prices)
+
+
+
+2.2.2 Calibration Execution
+
+# Same bounds as Step 2 but with Carr-Madan
+def mse_error_bates_cm(params):
+    if not (2*params[0]*params[1] >= params[2]**2 and params[5] >= 0):
+        return 1e9
+    
+    model_prices = []
+    for _, row in market_data_60d.iterrows():
+        price = bates_carr_madan(S0, row['Strike'], row['T'], r, params)
+        if row['Type'] == 'P':
+            price = price - S0 + row['Strike']*np.exp(-r*row['T'])
+        model_prices.append(price)
+    
+    error = np.mean((np.array(model_prices) - market_data_60d['Price'])**2)
+    print(f"Params: [κ={params[0]:.2f}, θ={params[1]:.3f}, λ={params[5]:.2f}] | MSE: {error:.5f}")
+    return error
+
+# Initial guess from Lewis calibration
+initial_params = [3.2, 0.04, 0.4, -0.7, 0.05, 0.15, -0.08, 0.12]  
+result_bates_cm = minimize(mse_error_bates_cm, initial_params, bounds=bounds, method='L-BFGS-B')
+
+
+2.4.3 Computational Trade-offs
+
+# Speed-quality tradeoff
+if precision_required:
+    use_lewis()  # 3.2x slower but more accurate for jumps
+else:
+    use_carr_madan()  # Faster for batch processing
+
+3.2.1 Market Euribor Rates
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.interpolate import CubicSpline
+
+# Raw market data
+maturities = np.array([1/52, 1/12, 3/12, 6/12, 1.0])  # in years
+rates = np.array([0.00648, 0.00679, 0.01173, 0.01809, 0.02556])
+
+# Cubic spline interpolation for weekly points
+weekly_maturities = np.linspace(0, 1, 53)  # 52 weeks + t=0
+cs = CubicSpline(maturities, rates)
+interpolated_rates = cs(weekly_maturities)
+
+
+Use the Lewis (2001) approach with a regular MSE error function considering a Heston model with jumps
+
+
+from scipy.interpolate import CubicSpline
+cs = CubicSpline(maturities, rates, bc_type='natural')  # Natural spline boundary conditions
+
+
+3.3.2 Calibration Process
+
+def cir_bond_price(r0, t, T, kappa, theta, sigma):
+    """CIR bond price formula (Brigo & Mercurio, 2006 Eq. 3.76)"""
+    h = np.sqrt(kappa**2 + 2*sigma**2)
+    B = (2*(np.exp((T-t)*h) - 1))/(2h + (kappa+h)*(np.exp((T-t)*h) - 1))
+    A = ((2h*np.exp((kappa+h)*(T-t)/2))/(2h + (kappa+h)*(np.exp((T-t)*h) - 1)))**(2*kappa*theta/sigma**2)
+    return A * np.exp(-B*r0)
+
+
+3.4.2 Model Fit
+
+
+# Calculate fitted rates
+fitted_rates = []
+for t in weekly_maturities[1:]:
+    bond = cir_bond_price(rates[0], 0, t, *result.x)
+    fitted_rates.append(-np.log(bond)/t)
+
+# Plot results
+plt.figure(figsize=(10, 6))
+plt.plot(weekly_maturities[1:]*52, interpolated_rates[1:]*100, 'b-', label='Market (Spline)')
+plt.plot(weekly_maturities[1:]*52, fitted_rates*100, 'r--', label='CIR Model')
+plt.scatter(maturities*52, rates*100, c='k', label='Market Observed')
+plt.title('CIR Model Calibration to Euribor Term Structure', fontsize=14)
+plt.xlabel('Weeks to Maturity'), plt.ylabel('Rate (%)')
+plt.legend(), plt.grid(True)
+plt.show()
+
+
+4.1.1 100,000 trials
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# CIR parameters
+kappa = 1.24
+theta = 0.0185
+sigma = 0.087
+r0 = 0.02556  # Current 12M Euribor
+
+# Simulation parameters
+n_sim = 100_000
+n_days = 252
+dt = 1/252
+
+# Euler-Maruyama simulation
+rates = np.zeros((n_sim, n_days))
+rates[:, 0] = r0
+
+for t in range(1, n_days):
+    dW = np.random.normal(0, np.sqrt(dt), n_sim)
+    rates[:, t] = rates[:, t-1] + kappa*(theta - rates[:, t-1])*dt + \
+                  sigma*np.sqrt(np.maximum(rates[:, t-1], 0))*dW
+
+# Extract terminal rates (1-year projection)
+terminal_rates = rates[:, -1]
+
+
+4.2.1 Distribution of 12M Euribor in 1 Year
+
+plt.figure(figsize=(10, 6))
+plt.hist(terminal_rates*100, bins=50, density=True, alpha=0.7)
+plt.title('Distribution of 12M Euribor in 1 Year', fontsize=14)
+plt.xlabel('Rate (%)'), plt.ylabel('Probability Density')
+plt.grid(True)
+plt.show()
+
+
+4.3.1 expected rates
+
+\text{Expected cash flow} = \text{Notional} \times (2.83\% - \text{Strike})
+
+
+4.3.2 Bond prices
+
+bond_price = exp(-2.83% * maturity)  # vs current 2.556%
+
+
+4.4.1 pricing adjustments
+
+
+# Adjust discount curves in pricing models
+def adjusted_discount(r):
+    return np.exp(-max(r, 0.005)  # Floor at 0.5% for negative rate protection

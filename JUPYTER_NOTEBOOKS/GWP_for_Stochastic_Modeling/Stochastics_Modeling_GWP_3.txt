@@ -1,0 +1,480 @@
+Member C to combine the data and compute daily returns for all 30 stocks
+
+import pandas as pd
+import numpy as np
+
+# Load the data collected by Member A
+data = pd.read_csv('stock_prices_2008_cleaned.csv', index_col=0, parse_dates=True)
+
+# Verify we have all 30 tickers
+print("Available tickers:", data.columns.tolist())
+print("Date range:", data.index.min(), "to", data.index.max())
+
+# 1. Combine into a single DataFrame (already done by Member A)
+# The data is already in a suitable time series structure with dates as index
+
+# 2. Compute daily returns (log returns as used in the paper)
+print("\nCalculating daily log returns...")
+returns = np.log(data / data.shift(1)).dropna()
+
+# Alternative: If you want simple percentage returns instead:
+# returns = data.pct_change().dropna()
+
+# 3. Save the returns data
+returns.to_csv('daily_returns_2008.csv')
+
+# 4. Display summary statistics
+print("\n--- Returns Summary Statistics ---")
+print(returns.describe())
+
+print("\nSuccess! Daily returns calculated and saved.")
+
+
+UBC Algorithm: Member B's Implementation
+
+import numpy as np
+import pandas as pd
+
+def ucb_algorithm(returns_data, c=2):
+    """
+    Implements the Upper Confidence Bound (UCB) algorithm for portfolio selection
+    
+    Parameters:
+    returns_data (pd.DataFrame): DataFrame with stocks as columns and daily returns as rows
+    c (float): Exploration parameter
+    
+    Returns:
+    tuple: (selected_arms_history, cumulative_returns)
+    """
+    K = returns_data.shape[1]  # Number of stocks
+    N = returns_data.shape[0]  # Number of days
+    
+    counts = np.zeros(K)       # N_k(t)
+    values = np.zeros(K)       # Q_k(t)
+    selected_arms_history = []
+    cumulative_returns = []
+    total_return = 1.0
+    
+    for t in range(N):
+        selected_arm = -1
+        max_upper_bound = -np.inf
+        
+        for k in range(K):
+            if counts[k] > 0:
+                average_reward = values[k] / counts[k]
+                exploration_bonus = c * np.sqrt(np.log(t+1) / counts[k])
+                upper_bound = average_reward + exploration_bonus
+            else:
+                upper_bound = np.inf
+                
+            if upper_bound > max_upper_bound:
+                max_upper_bound = upper_bound
+                selected_arm = k
+                
+        selected_arms_history.append(selected_arm)
+        reward = returns_data.iloc[t, selected_arm]
+        counts[selected_arm] += 1
+        values[selected_arm] += reward
+        
+        # Calculate cumulative return (assuming $1 initial investment)
+        total_return *= (1 + reward)
+        cumulative_returns.append(total_return)
+    
+    return selected_arms_history, cumulative_returns
+	
+	
+UBC Algorithm: Member C's Commented Version + Application
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def ucb_algorithm(returns_data, c=2):
+    """
+    Implements the Upper Confidence Bound (UCB) algorithm for portfolio selection.
+    This version includes detailed comments explaining each step.
+    
+    Parameters:
+    returns_data (pd.DataFrame): DataFrame where columns represent different stocks (arms)
+                                and rows represent daily returns (rewards).
+    c (float): Exploration parameter that controls the trade-off between exploration
+               and exploitation. Higher values encourage more exploration.
+    
+    Returns:
+    tuple: (selected_arms_history, cumulative_returns)
+           - selected_arms_history: List of selected stock indices at each time step
+           - cumulative_returns: List of cumulative portfolio values over time
+    """
+    # Initialize variables
+    K = returns_data.shape[1]  # Number of stocks/arms
+    N = returns_data.shape[0]  # Number of days/time steps
+    
+    counts = np.zeros(K)       # Tracks how many times each stock has been selected
+    values = np.zeros(K)       # Tracks the sum of returns for each stock
+    selected_arms_history = [] # Records which stock was chosen each day
+    cumulative_returns = []    # Tracks portfolio growth over time
+    total_return = 1.0         # Start with $1 initial investment
+    
+    # Main algorithm loop
+    for t in range(N):  # For each day/time step
+        selected_arm = -1
+        max_upper_bound = -np.inf
+        
+        # Calculate UCB score for each stock
+        for k in range(K):
+            if counts[k] > 0:
+                # Exploitation term: average historical return
+                average_reward = values[k] / counts[k]
+                
+                # Exploration term: confidence interval width
+                exploration_bonus = c * np.sqrt(np.log(t+1) / counts[k])
+                
+                # Combined UCB score
+                upper_bound = average_reward + exploration_bonus
+            else:
+                # If stock hasn't been tried yet, give it infinite score
+                upper_bound = np.inf
+                
+            # Select the stock with highest UCB score
+            if upper_bound > max_upper_bound:
+                max_upper_bound = upper_bound
+                selected_arm = k
+                
+        # Record selection and update statistics
+        selected_arms_history.append(selected_arm)
+        reward = returns_data.iloc[t, selected_arm]
+        counts[selected_arm] += 1
+        values[selected_arm] += reward
+        
+        # Update cumulative portfolio value
+        total_return *= (1 + reward)
+        cumulative_returns.append(total_return)
+    
+    return selected_arms_history, cumulative_returns
+
+# ===== Application to Dataset =====
+# Load the returns data (prepared by Member A)
+returns_data = pd.read_csv('daily_returns_2008.csv', index_col=0, parse_dates=True)
+
+# Run UCB algorithm
+selected_arms, cumulative_returns = ucb_algorithm(returns_data, c=2)
+
+# Convert arm indices to stock names
+stock_names = returns_data.columns
+selected_stocks = [stock_names[i] for i in selected_arms]
+
+# Display results
+print("\n=== UCB Algorithm Results ===")
+print(f"Final portfolio value: ${cumulative_returns[-1]:.2f}")
+print("\nStock selection frequency:")
+print(pd.Series(selected_stocks).value_counts().head(10))
+
+# Plot results
+plt.figure(figsize=(12, 6))
+plt.plot(cumulative_returns)
+plt.title("UCB Algorithm Portfolio Growth (Sep-Oct 2008)")
+plt.xlabel("Trading Day")
+plt.ylabel("Portfolio Value ($)")
+plt.grid(True)
+plt.show()
+
+
+Implementation Roadmap: Risk-Aware UCB (Huo's Algorithm 1)
+
+1. Core Modifications to Baseline UCB
+
+def risk_aware_ucb(returns_data, c=2, γ=0.95, λ=0.7):
+    """
+    Implements Huo's hybrid UCB-CVaR algorithm (Algorithm 1 in paper)
+    
+    Parameters:
+    - γ: CVaR confidence level (0.95 in paper)
+    - λ: Risk-reward balance (0=min risk, 1=max reward)
+    """
+    # Initialization (same as before)
+    K, N = returns_data.shape
+    counts = np.zeros(K)
+    values = np.zeros(K)
+    
+    # NEW: CVaR components
+    historical_returns = []  # Store all observed returns for CVaR calculation
+    portfolio_history = []
+    
+    for t in range(N):
+        # --- UCB Component (Eq 2.2) ---
+        ucb_scores = []
+        for k in range(K):
+            if counts[k] > 0:
+                avg_return = values[k] / counts[k]
+                bonus = c * np.sqrt(np.log(t+1) / counts[k])
+                ucb_scores.append(avg_return + bonus)
+            else:
+                ucb_scores.append(np.inf)
+        
+        # --- CVaR Component (Eq 2.4) ---
+        if t > 0:  # Need historical data
+            # Calculate CVaR-minimizing portfolio (simplified)
+            cvar_weights = minimize_cvar(historical_returns, γ)  
+            
+        # --- Hybrid Portfolio (Eq 2.5) ---
+        if t == 0:
+            weights = np.ones(K)/K  # Start with equal weights
+        else:
+            ucb_arm = np.argmax(ucb_scores)
+            ucb_weights = np.eye(K)[ucb_arm]  # One-hot vector
+            weights = λ*ucb_weights + (1-λ)*cvar_weights
+        
+        # Track portfolio and returns
+        daily_return = returns_data.iloc[t] @ weights
+        historical_returns.append(returns_data.iloc[t])
+        portfolio_history.append(weights)
+        
+        # Update counts/values for UCB
+        chosen_arm = np.argmax(weights)  # Dominant asset
+        counts[chosen_arm] += 1
+        values[chosen_arm] += daily_return
+    
+    return portfolio_history
+	
+
+2. CVaR Minimization Subroutine
+
+from scipy.optimize import minimize
+
+def minimize_cvar(historical_returns, γ=0.95):
+    """Simplified CVaR minimization (Rockafellar & Uryasev 2000 method)"""
+    def objective(weights, returns=historical_returns, γ=γ):
+        portfolio_returns = np.array(returns) @ weights
+        var = np.percentile(portfolio_returns, 100*(1-γ))
+        cvar = portfolio_returns[portfolio_returns <= var].mean()
+        return cvar
+    
+    # Constraints: weights sum to 1, long-only
+    constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
+    bounds = [(0,1) for _ in range(len(historical_returns[0]))]
+    
+    result = minimize(
+        objective,
+        x0=np.ones(len(historical_returns[0]))/len(historical_returns[0]),
+        bounds=bounds,
+        constraints=constraints
+    )
+    return result.x
+	
+	
+3. Validation Against daily returns 2008 Dataset
+
+# Load data
+returns = pd.read_csv('daily_returns_2008.csv') 
+
+# Compare algorithms
+ucb_results = ucb_algorithm(returns)  # Original
+risk_aware_results = risk_aware_ucb(returns, λ=0.7)  # Hybrid
+
+# Plot comparison
+plt.figure(figsize=(10,5))
+plt.plot(np.cumprod(1 + returns.values[np.arange(len(returns)), ucb_results[0]]), label='Vanilla UCB')
+plt.plot(np.cumprod(1 + [r @ returns.iloc[i] for i, r in enumerate(risk_aware_results)]), label='Risk-Aware UCB')
+plt.title("2008 Crisis: Vanilla vs. Risk-Aware UCB")
+plt.legend(); plt.show()
+
+
+Priority 1: Computational Optimization for Scale
+Note: Most critical for real-world portfolios with 100+ assets
+
+1. Accelerate CVaR Calculation
+
+from numba import njit  # JIT compilation for speed
+
+@njit
+def fast_cvar(returns, weights, γ=0.95):
+    """Numba-optimized CVaR calculation (10-100x speedup)"""
+    portfolio_returns = returns @ weights
+    var = np.percentile(portfolio_returns, 100*(1-γ))
+    return np.mean(portfolio_returns[portfolio_returns <= var])
+
+# Usage: Replace objective() in minimize_cvar()
+	
+	
+Priority 2: Approximate Methods for Large K
+Note: When K > 50, exact optimization becomes impractical
+
+2.1 Asset Clustering (Pre-Filtering)
+
+from sklearn.cluster import KMeans
+
+def cluster_assets(returns, n_clusters=10):
+    """Reduce asset universe via correlation clustering"""
+    corr_matrix = returns.corr()
+    kmeans = KMeans(n_clusters=n_clusters).fit(corr_matrix)
+    return [np.where(kmeans.labels_ == i)[0] for i in range(n_clusters)]
+
+# Apply before UCB: work with cluster representatives
+
+
+2.2 Stochastic Gradient Descent (SGD) for CVaR
+
+def sgd_cvar(returns, γ=0.95, epochs=100):
+    """Approximate CVaR minimization for large K"""
+    weights = np.ones(returns.shape[1])/returns.shape[1]
+    lr = 0.01
+    
+    for _ in range(epochs):
+        grad = estimate_cvar_gradient(returns, weights, γ)  # Numerical gradient
+        weights -= lr * grad
+        weights = np.clip(weights, 0, 1)
+        weights /= weights.sum()
+    return weights
+	
+	
+Priority 3: Hyperparameter Optimization
+Note: Critical for crisis periods like 2008
+
+3.1 Adaptive λ Tuning
+
+def dynamic_lambda(volatility_window=20, min_lambda=0.3):
+    """Auto-adjust λ based on market volatility"""
+    recent_vol = returns.iloc[-volatility_window:].std().mean()
+    return max(min_lambda, 1 - recent_vol)  # Lower λ during high volatility
+	
+	
+3.2 Grid Search Protocol
+
+params = {
+    'γ': [0.90, 0.95, 0.99],  # CVaR confidence
+    'λ': [0.5, 0.7, 0.9],      # Risk-reward balance
+    'c': [1, 2, 4]             # UCB exploration
+}
+
+best_sharpe = -np.inf
+for config in ParameterGrid(params):
+    results = risk_aware_ucb(returns, **config)
+    sharpe = calculate_sharpe(results)
+    if sharpe > best_sharpe:
+        best_config = config
+		
+		
+Priority 4: Parallelization
+Note: For backtesting or live trading
+
+4.1 Parallel CVaR Optimization
+
+from joblib import Parallel, delayed
+
+def parallel_cvar(returns_chunks):
+    return Parallel(n_jobs=-1)(
+        delayed(minimize_cvar)(chunk) for chunk in returns_chunks
+    )
+	
+	
+	
+Step 10
+
+Updating 30 Data Series
+
+# Member B (Downloads all data)
+import yfinance as yf
+import pandas as pd
+from time import sleep
+import numpy as np
+
+tickers = [
+    'JPM', 'WFC', 'BAC', 'C', 'GS', 'USB', 'MS', 'KEY', 'PNC', 'COF',
+    'AXP', 'PRU', 'SCHW', 'FITB', 'HBAN', 'KR', 'PFE', 'XOM', 'WMT', 
+    'DAL', 'CSCO', 'VTR', 'EQIX', 'DUK', 'NFLX', 'GE', 'APA', 'F', 
+    'REGN', 'CMS'
+]
+
+def safe_download(ticker_list, start_date, end_date, max_retries=3):
+    """Improved download function with better error handling"""
+    data = []
+    failed_tickers = []
+    
+    for ticker in ticker_list:
+        retries = 0
+        while retries < max_retries:
+            try:
+                print(f"Downloading {ticker} (attempt {retries+1})...")
+                df = yf.Ticker(ticker).history(
+                    start=start_date,
+                    end=end_date,
+                    auto_adjust=True
+                )
+                
+                if not df.empty:
+                    close_prices = df['Close'].rename(ticker)
+                    data.append(close_prices)
+                    print(f"Success: {ticker}")
+                    break
+                else:
+                    print(f"No data for {ticker}")
+                    failed_tickers.append(ticker)
+                    break
+                    
+            except Exception as e:
+                retries += 1
+                print(f"Error downloading {ticker}: {str(e)}")
+                if retries == max_retries:
+                    failed_tickers.append(ticker)
+                sleep(2 * retries)  # Exponential backoff
+    
+    if data:
+        result = pd.concat(data, axis=1)
+    else:
+        result = pd.DataFrame()
+        
+    if failed_tickers:
+        print(f"\nFailed to download: {failed_tickers}")
+    
+    return result
+
+# Download data with improved error handling
+print("Starting data download...")
+prices = safe_download(tickers, '2020-03-01', '2020-04-30')
+
+# Save the data
+if not prices.empty:
+    prices.to_csv('all_prices_2020.csv')
+    print("\nData saved to 'all_prices_2020.csv'")
+    print(f"Successfully downloaded {len(prices.columns)}/{len(tickers)} tickers")
+    print("First 5 rows:")
+    print(prices.head())
+else:
+    print("\nFailed to download any data. Please check your internet connection.")
+	
+	
+# Member A (Returns Calculation)
+
+import pandas as pd
+import numpy as np
+
+def calculate_returns(input_file, output_file):
+    """Calculate and save log returns"""
+    try:
+        # Load data with date parsing
+        prices = pd.read_csv(input_file, index_col='Date', parse_dates=True)
+        
+        # Handle any remaining missing values
+        prices = prices.dropna(axis=1, how='all')
+        
+        # Calculate log returns
+        returns = np.log(prices / prices.shift(1)).dropna()
+        
+        # Save returns
+        returns.to_csv(output_file)
+        
+        print("\nReturns calculation complete")
+        print(f"Data covers {returns.shape[0]} trading days")
+        print(f"Contains {returns.shape[1]} assets")
+        print("\nSummary statistics:")
+        print(returns.describe())
+        
+        return returns
+        
+    except FileNotFoundError:
+        print(f"Error: File '{input_file}' not found.")
+    except Exception as e:
+        print(f"Error processing returns: {str(e)}")
+
+# Process the returns
+calculate_returns('all_prices_2020.csv', 'all_returns_2020.csv')
